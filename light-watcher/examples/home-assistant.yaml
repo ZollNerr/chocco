@@ -1,0 +1,46 @@
+# Light Watcher v2.0 + Home Assistant
+#
+# Вариант 1 (рекомендуется): MQTT.
+#   Настройте MQTT в боте: /mqtt 192.168.1.10 1883 user pass
+#   Сущности появятся сами (MQTT discovery). Ниже — только примеры автоматизаций.
+#
+# Вариант 2: без MQTT, через HTTP API (REST sensor). Замените IP.
+
+rest:
+  - resource: http://192.168.1.50/api/status
+    scan_interval: 15
+    binary_sensor:
+      - name: "Light Watcher (REST)"
+        unique_id: lightwatcher_rest_power
+        device_class: power
+        value_template: "{{ value_json.power }}"
+    sensor:
+      - name: "Без світла за 24 год (REST)"
+        unique_id: lightwatcher_rest_down24
+        unit_of_measurement: "min"
+        value_template: "{{ (value_json.downtime_24h_s / 60) | round(0) }}"
+
+automation:
+  - alias: "Світло зникло — вимкнути важкі навантаження"
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.light_watcher_elektromerezha   # имя сущности из MQTT discovery
+        to: "off"
+    action:
+      - service: switch.turn_off
+        target:
+          entity_id: switch.boiler
+      - service: notify.mobile_app_phone
+        data:
+          message: "Світло зникло. Бойлер вимкнено, щоб зберегти акумулятор."
+
+  - alias: "Світло з'явилося — увімкнути назад через 2 хв"
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.light_watcher_elektromerezha
+        to: "on"
+        for: "00:02:00"
+    action:
+      - service: switch.turn_on
+        target:
+          entity_id: switch.boiler
