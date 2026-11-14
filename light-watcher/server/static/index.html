@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Light Watcher Hub</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--fg:#1d2330;--mut:#6b7280;--bd:#e3e6eb;--acc:#0057B8;--on:#16a34a;--off:#dc2626;--unk:#9ca3af}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1115;--card:#181b21;--fg:#e6e8ec;--mut:#9aa1ad;--bd:#2a2f38}}
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--fg)}
+header{background:var(--acc);color:#fff;padding:14px 16px;border-bottom:4px solid #FFD700;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+header h1{margin:0;font-size:19px;flex:1}
+.sum{display:flex;gap:14px;font-size:14px}
+.sum b{font-size:18px}
+main{max-width:1200px;margin:0 auto;padding:16px;display:grid;gap:16px;grid-template-columns:1fr}
+@media(min-width:900px){main{grid-template-columns:1.1fr 1fr}}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:14px;min-width:0}
+#map{height:420px;border-radius:10px}
+input{padding:9px 11px;border:1px solid var(--bd);border-radius:8px;background:var(--bg);color:var(--fg);font-size:14px;width:100%}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th,td{text-align:left;padding:8px 6px;border-bottom:1px solid var(--bd)}
+th{color:var(--mut);font-weight:600;font-size:12px}
+tr.row{cursor:pointer}tr.row:hover{background:var(--bg)}
+.dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:middle}
+.mut{color:var(--mut);font-size:12px}
+.bars{display:flex;gap:2px;align-items:flex-end;height:90px;margin:10px 0}
+.bars div{flex:1;background:var(--off);border-radius:2px 2px 0 0;min-height:1px}
+.k{display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px dashed var(--bd);font-size:14px}
+.btn{background:var(--acc);color:#fff;border:0;border-radius:8px;padding:8px 12px;cursor:pointer;font-size:13px;text-decoration:none}
+.tablewrap{overflow-x:auto}
+</style>
+</head>
+<body>
+<header>
+  <h1>⚡ Light Watcher Hub</h1>
+  <div class="sum"><span>🟢 <b id="nOn">–</b></span><span>🔴 <b id="nOff">–</b></span><span>⚪ <b id="nUnk">–</b></span></div>
+</header>
+<main>
+  <section class="card">
+    <div id="map"></div>
+    <p class="mut">Об'єкти без координат є лише в таблиці. Координати задає адміністратор (PATCH /api/v1/sites/{id}).</p>
+  </section>
+  <section class="card">
+    <input id="q" placeholder="Пошук за назвою або адресою">
+    <div class="tablewrap"><table>
+      <thead><tr><th>Об'єкт</th><th>Стан</th><th>Без світла 24 год</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table></div>
+  </section>
+  <section class="card" id="details" style="display:none;grid-column:1/-1"></section>
+  <section class="card mut" style="grid-column:1/-1">
+    Ключ адміністратора (бачити приватні об'єкти): <input id="key" type="password" style="max-width:260px;display:inline-block">
+    · API: <a href="/docs">/docs</a> · <a href="/metrics">/metrics</a>
+  </section>
+</main>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const COL = {on:'var(--on)', off:'var(--off)', unknown:'var(--unk)'};
+const HEX = {on:'#16a34a', off:'#dc2626', unknown:'#9ca3af'};
+let key = ''; try { key = localStorage.getItem('lwkey') || ''; } catch (e) {}
+$('key').value = key;
+$('key').onchange = () => { key = $('key').value; try { localStorage.setItem('lwkey', key); } catch (e) {} load(); };
+const hdr = () => key ? {headers: {Authorization: 'Bearer ' + key}} : {};
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function dur(s){ if(s==null) return '—'; s=Math.max(0,s|0); const d=Math.floor(s/86400), h=Math.floor(s%86400/3600), m=Math.floor(s%3600/60);
+  return d ? `${d} д ${h} год` : h ? `${h} год ${m} хв` : `${m} хв`; }
+function when(ts){ return ts ? new Date(ts*1000).toLocaleString('uk-UA',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}) : '—'; }
+function st(s){ const state = s.online ? s.state : 'unknown';
+  const label = !s.online ? 'немає зв\'язку' : s.state==='on' ? 'світло є' : s.state==='off' ? 'світла немає' : 'невідомо';
+  return {state, label}; }
+
+// Карта необязательна: если CDN/тайлы недоступны, таблица и отчёты работают без неё
+let map = null, layer = null;
+if (window.L) {
+  map = L.map('map').setView([49.0, 31.3], 6);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom: 19, attribution: '© OpenStreetMap'}).addTo(map);
+  layer = L.layerGroup().addTo(map);
+} else {
+  $('map').outerHTML = '<p class="mut">Карта недоступна (не завантажилась бібліотека Leaflet).</p>';
+}
+let sites = [], fitted = false;
+
+async function load(){
+  try {
+    const r = await fetch('/api/v1/sites', hdr());
+    if (!r.ok) throw new Error(r.status);
+    sites = await r.json();
+  } catch (e) { $('rows').innerHTML = `<tr><td colspan="3" class="mut">Не вдалося завантажити (${esc(e.message)})</td></tr>`; return; }
+  render();
+}
+function render(){
+  const q = $('q').value.toLowerCase();
+  let on=0, off=0, unk=0;
+  if (layer) layer.clearLayers();
+  const pts = [];
+  $('rows').innerHTML = sites.filter(s => !q || (s.name+' '+(s.address||'')).toLowerCase().includes(q)).map(s => {
+    const {state, label} = st(s);
+    state==='on' ? on++ : state==='off' ? off++ : unk++;
+    if (layer && s.lat != null && s.lon != null) {
+      pts.push([s.lat, s.lon]);
+      L.circleMarker([s.lat, s.lon], {radius: 9, color: '#fff', weight: 2, fillColor: HEX[state], fillOpacity: .95})
+        .bindPopup(`<b>${esc(s.name)}</b><br>${esc(s.address||'')}<br>${label} · ${dur(s.duration_s)}`)
+        .on('click', () => show(s.id)).addTo(layer);
+    }
+    return `<tr class="row" onclick="show('${esc(s.id)}')"><td><b>${esc(s.name)}</b><div class="mut">${esc(s.address||'')}</div></td>
+      <td><span class="dot" style="background:${COL[state]}"></span>${label}<div class="mut">${dur(s.duration_s)}${s.battery_pct!=null?' · 🔋'+s.battery_pct+'%':''}</div></td>
+      <td>${dur(s.downtime_24h_s)}</td></tr>`;
+  }).join('') || '<tr><td colspan="3" class="mut">Поки немає жодного пристрою</td></tr>';
+  $('nOn').textContent = on; $('nOff').textContent = off; $('nUnk').textContent = unk;
+  if (map && pts.length && !fitted) { map.fitBounds(pts, {maxZoom: 14, padding: [30, 30]}); fitted = true; }
+}
+async function show(id){
+  const [s, rep] = await Promise.all([
+    fetch('/api/v1/sites/' + encodeURIComponent(id), hdr()).then(r => r.json()),
+    fetch('/api/v1/sites/' + encodeURIComponent(id) + '/report?days=30', hdr()).then(r => r.json())]);
+  const {label} = st(s);
+  const max = Math.max(3600, ...rep.days.map(d => d.downtime_s));
+  $('details').style.display = '';
+  $('details').innerHTML = `<h2 style="margin:0 0 6px">${esc(s.name)}</h2><div class="mut">${esc(s.address||'')}</div>
+    <div class="k"><span>Стан</span><b>${label}, ${dur(s.duration_s)}</b></div>
+    <div class="k"><span>Доступність за 30 днів</span><b>${rep.availability_pct ?? '—'}%</b></div>
+    <div class="k"><span>Відключень за 30 днів</span><b>${rep.outages}</b></div>
+    <div class="k"><span>Без світла за 30 днів</span><b>${dur(rep.downtime_s)}</b></div>
+    <div class="k"><span>Остання відомість</span><b>${when(s.last_seen)}</b></div>
+    <p class="mut" style="margin:12px 0 0">Години без світла по днях (30 днів)</p>
+    <div class="bars">${rep.days.map(d => `<div title="${d.date}: ${dur(d.downtime_s)}" style="height:${(100*d.downtime_s/max).toFixed(1)}%"></div>`).join('')}</div>
+    <p class="mut">Останні відключення:</p>
+    ${(s.outages||[]).slice(0,10).map(o => `<div class="k"><span>${when(o.off)} → ${o.on ? when(o.on) : 'триває'}</span><b>${dur(o.duration_s ?? (Date.now()/1000 - o.off))}</b></div>`).join('') || '<p class="mut">немає</p>'}
+    <p><a class="btn" href="/api/v1/sites/${encodeURIComponent(id)}/outages.csv">⬇️ CSV</a></p>`;
+  $('details').scrollIntoView({behavior: 'smooth'});
+}
+$('q').oninput = render;
+load(); setInterval(load, 15000);
+</script>
+</body>
+</html>

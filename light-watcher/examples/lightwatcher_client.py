@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Примеры интеграции с Light Watcher v2.0 (только стандартная библиотека Python 3).
+Примеры интеграции с Light Watcher v2.x (только стандартная библиотека Python 3).
 
   1) Опрос состояния:     python3 lightwatcher_client.py status http://lightwatcher.local
   2) Слежение (polling):  python3 lightwatcher_client.py watch  http://192.168.1.50 10

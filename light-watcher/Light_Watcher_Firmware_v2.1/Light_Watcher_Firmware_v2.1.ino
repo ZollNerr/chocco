@@ -1,4 +1,4 @@
-/* Light-Watcher firmware v2.0 (модернизация на базе v1.6)
+/* Light-Watcher firmware v2.1 (модернизация на базе v1.6)
 Оригинал: https://github.com/Stanislav-developer/Light_Watcher
 Авторы оригинала: Stanislav Turii, Noctyon
 
@@ -10,6 +10,11 @@
   * Локальная веб-панель (http://lightwatcher.local) и страница настроек с паролем.
   * Новые команды бота: история, статистика, калибровка порога, тихие часы, шаблоны сообщений и др.
   * Автоматический переход на летнее/зимнее время (POSIX TZ).
+  v2.1:
+  * Мониторинг аккумулятора: напряжение, %, прогноз "на сколько хватит", предупреждение о разряде.
+  * Подписка жильцов/соседей: /subscribe (открытая или с одобрения владельца).
+  * Пульс (heartbeat) на webhook — для сервера-агрегатора (папка server/).
+  * OTA-обновление: веб-страница /update, Arduino IDE по сети, команда бота /update URL.
 
 БИБЛИОТЕКИ (Arduino IDE -> Library Manager):
   * UniversalTelegramBot (Brian Lough) 1.3.0+
@@ -19,9 +24,10 @@
 
 НАСТРОЙКИ ПРОШИВКИ (ESP32-C3), как в v1.6:
   Board: "ESP32C3 Dev Module", USB CDC On Boot: "Enabled",
-  Partition Scheme: "Huge APP (3MB No OTA/1MB SPIFFS)".
+  Partition Scheme: "Minimal SPIFFS (1.9MB APP with OTA/190KB SPIFFS)"  <- нужно для OTA.
+  (со схемой "Huge APP (3MB No OTA)" из v1.6 прошивка тоже работает, но без OTA)
 
-ВАЖНО: На ESP32-C3 используйте пины ADC1 (GPIO 0..5).
+ВАЖНО: На ESP32-C3 АЦП1 — это GPIO 0..4 (GPIO5 — АЦП2, он не работает вместе с Wi-Fi).
 */
 
 #include <WiFi.h>
@@ -35,16 +41,21 @@
 #include <ESPmDNS.h>
 #include <HTTPClient.h>
 #include <PubSubClient.h>
+#include <HTTPUpdate.h>
+#include <HTTPUpdateServer.h>
+#include <ArduinoOTA.h>
+#include <esp_ota_ops.h>
 
 // ============================================================================
 // Константы
 // ============================================================================
-#define FW_VERSION      "2.0"
+#define FW_VERSION      "2.1"
 #define READ_PIN        3        // аналоговый вход детектора сети (ADC1)
 #define BOOT_PIN        9        // кнопка BOOT на ESP32-C3 (на ESP32 обычно 0)
 #define HIST_SIZE       30       // сколько последних отключений хранить
 #define OUTBOX_SIZE     12       // размер очереди неотправленных уведомлений
 #define TG_POLL_MS      2000     // как часто опрашивать Telegram
+#define MAX_SUBS        30       // максимум подписчиков
 #define AP_NAME         "Light-Watcher-Setup"
 
 static const char* NTP1 = "pool.ntp.org";
@@ -76,6 +87,12 @@ struct Config {
   String   mqttHost; uint16_t mqttPort = 1883;
   String   mqttUser, mqttPass, mqttBase;
   String   apiKey;                // пароль веб-настроек и ключ API (логин: admin)
+  int8_t   batPin   = -1;         // вход АЦП с делителя аккумулятора (-1 = не используется)
+  float    batDiv   = 2.0;        // коэффициент делителя: Vбат = Vпина * batDiv
+  uint8_t  batCells = 1;          // Li-ion банок последовательно (1S..4S)
+  uint8_t  batLow   = 20;         // % — предупреждение о низком заряде
+  bool     subsOpen = false;      // true — любой может /subscribe, false — с одобрения владельца
+  uint16_t hbMin    = 0;          // пульс на webhook каждые N минут (0 = выкл)
 } cfg;
 
 // ============================================================================
@@ -88,6 +105,7 @@ WebServer            server(80);
 DNSServer            dnsServer;
 WiFiClient           mqttNet;
 PubSubClient         mqtt(mqttNet);
+HTTPUpdateServer     httpUpdater;
 
 String deviceId;                  // короткий уникальный ID устройства (из MAC)
 
@@ -112,10 +130,11 @@ OutageRec hist[HIST_SIZE];
 uint8_t   histHead = 0, histCount = 0;
 
 // ---- Очередь уведомлений ----
-enum EvType : uint8_t { EV_OFF, EV_ON, EV_ON_REBOOT, EV_BOOT, EV_TEST };
+enum EvType : uint8_t { EV_OFF, EV_ON, EV_ON_REBOOT, EV_BOOT, EV_TEST, EV_BAT_LOW };
 #define T_OWNER 0x01
 #define T_GROUP 0x02
 #define T_HOOK  0x04
+#define T_SUBS  0x08
 struct Event {
   EvType   type;
   uint32_t ts;       // unix-время события (0 = ещё неизвестно)
@@ -124,6 +143,7 @@ struct Event {
   uint32_t refTs;    // начало отключения (для EV_ON)
   uint8_t  pending;  // каким адресатам ещё не доставлено
   uint8_t  fails;
+  uint8_t  subIdx;   // до какого подписчика дошли
 };
 Event    outbox[OUTBOX_SIZE];
 uint8_t  obHead = 0, obCount = 0;
@@ -133,6 +153,20 @@ bool     timeSynced  = false;
 uint32_t restartAt   = 0;
 uint32_t mqttLastTry = 0;
 bool     cfgOk       = false;     // конфигурация хоть раз успешно заработала
+
+// ---- Аккумулятор ----
+float    batV       = 0;          // сглаженное напряжение аккумулятора
+uint32_t batRefMs   = 0;          // от какого момента считаем скорость разряда
+float    batRefPct  = -1;
+bool     batLowSent = false;
+
+// ---- Подписчики ----
+String   subs[MAX_SUBS];
+uint8_t  subCount = 0;
+
+bool batEnabled();
+int batPct();
+String batLine();
 
 // ============================================================================
 // Утилиты
@@ -191,6 +225,44 @@ bool isQuietNow() {
 // ============================================================================
 // Хранилище (Preferences). Ключи v1.6 сохранены для бесшовного обновления.
 // ============================================================================
+// ---- Подписчики: хранятся строкой "id1,id2,..." ----
+void loadSubs() {
+  String s = prefs.getString("subs", "");
+  subCount = 0;
+  int from = 0;
+  while (from < (int)s.length() && subCount < MAX_SUBS) {
+    int e = s.indexOf(',', from);
+    if (e < 0) e = s.length();
+    String id = s.substring(from, e);
+    id.trim();
+    if (id.length()) subs[subCount++] = id;
+    from = e + 1;
+  }
+}
+void saveSubs() {
+  String s;
+  for (uint8_t i = 0; i < subCount; i++) { if (i) s += ","; s += subs[i]; }
+  prefs.putString("subs", s);
+}
+int findSub(const String& id) {
+  for (uint8_t i = 0; i < subCount; i++) if (subs[i] == id) return i;
+  return -1;
+}
+bool addSub(const String& id) {
+  if (id.isEmpty() || id.length() > 20 || findSub(id) >= 0 || subCount >= MAX_SUBS) return false;
+  subs[subCount++] = id;
+  saveSubs();
+  return true;
+}
+bool delSub(const String& id) {
+  int i = findSub(id);
+  if (i < 0) return false;
+  for (uint8_t j = i; j + 1 < subCount; j++) subs[j] = subs[j + 1];
+  subCount--;
+  saveSubs();
+  return true;
+}
+
 void loadConfig() {
   cfg.ssid     = prefs.getString("ssid", "");
   cfg.pass     = prefs.getString("pass", "");
@@ -216,6 +288,13 @@ void loadConfig() {
   cfg.mqttBase = prefs.getString("mqBase", "lightwatcher/" + deviceId);
   cfg.apiKey   = prefs.getString("apiKey", "");
   if (cfg.apiKey.isEmpty()) { cfg.apiKey = randomKey(); prefs.putString("apiKey", cfg.apiKey); }
+  cfg.batPin   = prefs.getChar("batPin", -1);
+  cfg.batDiv   = prefs.getFloat("batDiv", 2.0);
+  cfg.batCells = prefs.getUChar("batCells", 1);
+  cfg.batLow   = prefs.getUChar("batLow", 20);
+  cfg.subsOpen = prefs.getBool("subsOpen", false);
+  cfg.hbMin    = prefs.getUShort("hbMin", 0);
+  loadSubs();
   cfgOk = prefs.getBool("cfgOk", false);
 }
 
@@ -304,6 +383,7 @@ uint8_t defaultTargets() {
   uint8_t m = T_OWNER;
   if (cfg.groupId.length()) m |= T_GROUP;
   if (cfg.webhookUrl.length()) m |= T_HOOK;
+  if (subCount) m |= T_SUBS;
   return m;
 }
 
@@ -311,7 +391,7 @@ void pushEvent(EvType t, uint32_t dur, uint32_t refTs, uint8_t targets) {
   if (obCount == OUTBOX_SIZE) { obHead = (obHead + 1) % OUTBOX_SIZE; obCount--; }  // вытесняем самое старое
   Event& e = outbox[(obHead + obCount) % OUTBOX_SIZE];
   e.type = t; e.ts = nowTs(); e.ms = millis(); e.dur = dur; e.refTs = refTs;
-  e.pending = targets; e.fails = 0;
+  e.pending = targets; e.fails = 0; e.subIdx = 0;
   obCount++;
   nextFlushAt = millis();
 }
@@ -324,6 +404,7 @@ String applyTpl(String t, const Event& e) {
   t.replace("{duration}", formatDuration(e.dur));
   t.replace("{off_time}", fmtTs(e.refTs, "%d.%m %H:%M"));
   t.replace("{count}", String(outageCount));
+  t.replace("{battery}", batPct() >= 0 ? String(String(batPct()) + "%") : String(""));
   return t;
 }
 
@@ -338,6 +419,11 @@ String renderEvent(const Event& e, bool delayed) {
           "🕐 " + fmtTs(e.ts, "%d.%m.%Y %H:%M:%S") + "\n"
           "💡 Електромережа: " + String(e.dur ? "<b>ПРИСУТНЯ</b> ✅" : "<b>ВІДСУТНЯ</b> ⚠️ (резервне живлення)") + "\n"
           "🌐 http://" + WiFi.localIP().toString() + "  (http://" + cfg.host + ".local)";
+      if (batPct() >= 0) s += "\n" + batLine();
+      break;
+    case EV_BAT_LOW:
+      s = "🪫 <b>" + htmlEscape(cfg.name) + "</b>: заряд резерву " + String(e.dur) + "%";
+      if (e.refTs) s += ", залишилось ~" + formatDuration(e.refTs);
       break;
     case EV_TEST: s = "🧪 Тестове повідомлення від <b>" + htmlEscape(cfg.name) + "</b>"; break;
   }
@@ -350,6 +436,7 @@ const char* eventName(EvType t) {
     case EV_OFF: return "power_off";
     case EV_ON: case EV_ON_REBOOT: return "power_on";
     case EV_BOOT: return "boot";
+    case EV_BAT_LOW: return "battery_low";
     default: return "test";
   }
 }
@@ -357,7 +444,7 @@ const char* eventName(EvType t) {
 String eventJson(const Event& e) {
   JsonDocument d;
   d["event"]     = eventName(e.type);
-  d["power"]     = e.type == EV_OFF ? false : e.type == EV_BOOT ? (bool)e.dur : e.type == EV_TEST ? powerOn : true;
+  d["power"]     = (e.type == EV_OFF || e.type == EV_BAT_LOW) ? false : e.type == EV_BOOT ? (bool)e.dur : e.type == EV_TEST ? powerOn : true;
   d["device"]    = cfg.name;
   d["device_id"] = deviceId;
   d["ts"]        = e.ts;
@@ -369,6 +456,7 @@ String eventJson(const Event& e) {
   }
   d["outages_total"] = outageCount;
   d["delayed_s"]     = (millis() - e.ms) / 1000;
+  if (batEnabled() && batV > 0) { d["battery_pct"] = batPct(); d["battery_v"] = roundf(batV * 100) / 100; }
   String s; serializeJson(d, s);
   return s;
 }
@@ -414,30 +502,94 @@ void flushOutbox() {
   Event& e = outbox[obHead];
   if (!e.ts && timeValid()) e.ts = nowTs() - (millis() - e.ms) / 1000;  // восстанавливаем время задним числом
   bool delayed = (millis() - e.ms) > 60000;
+  bool silent = isQuietNow() && e.type != EV_TEST;
+  String text;
+  if (e.pending & (T_OWNER | T_GROUP | T_SUBS)) text = renderEvent(e, delayed);
 
-  if (e.pending & (T_OWNER | T_GROUP)) {
-    String text = renderEvent(e, delayed);
-    bool silent = isQuietNow() && e.type != EV_TEST;
-    if ((e.pending & T_OWNER) && sendTg(cfg.chatId, text, silent)) e.pending &= ~T_OWNER;
-    if ((e.pending & T_GROUP) && sendTg(cfg.groupId, text, silent)) e.pending &= ~T_GROUP;
+  // 1. Владелец. Не дошло — значит нет интернета: ждём и повторяем, остальным пока не шлём.
+  if (e.pending & T_OWNER) {
+    if (!sendTg(cfg.chatId, text, silent)) { nextFlushAt = millis() + 15000; return; }
+    e.pending &= ~T_OWNER;
   }
-  if (e.pending & T_HOOK) {
-    if (cfg.webhookUrl.isEmpty() || httpPostJson(cfg.webhookUrl, eventJson(e), eventName(e.type))) e.pending &= ~T_HOOK;
+  // 2. Группа и webhook
+  if ((e.pending & T_GROUP) && sendTg(cfg.groupId, text, silent)) e.pending &= ~T_GROUP;
+  if ((e.pending & T_HOOK) && (cfg.webhookUrl.isEmpty() || httpPostJson(cfg.webhookUrl, eventJson(e), eventName(e.type))))
+    e.pending &= ~T_HOOK;
+  // 3. Подписчики — порциями по 5, чтобы не блокировать устройство надолго.
+  //    Ошибки отдельных подписчиков (например, заблокировали бота) пропускаем.
+  if (e.pending & T_SUBS) {
+    for (uint8_t n = 0; n < 5 && e.subIdx < subCount; n++, e.subIdx++) sendTg(subs[e.subIdx], text, silent);
+    if (e.subIdx >= subCount) e.pending &= ~T_SUBS;
+  }
+  // Интернет есть (владелец получил), а группа/webhook стабильно не принимают — ошибка их настройки.
+  if ((e.pending & (T_GROUP | T_HOOK)) && ++e.fails >= 10) {
+    Serial.println("Outbox: група/webhook недоступні, пропускаю");
+    e.pending &= ~(T_GROUP | T_HOOK);
   }
 
-  // Владелец уже получил, а группа/webhook — нет: интернет есть, значит это ошибка их настройки.
-  // После 10 таких попыток прекращаем, чтобы не блокировать очередь.
-  // Если не доходит и владельцу — это нет интернета: ждём сколько нужно.
-  if (e.pending && !(e.pending & T_OWNER) && ++e.fails >= 10) {
-    Serial.println("Outbox: адресат недоступен, пропускаю");
-    e.pending = 0;
-  }
+  if (!e.pending) { obHead = (obHead + 1) % OUTBOX_SIZE; obCount--; nextFlushAt = millis() + 300; }
+  else if (e.pending == T_SUBS) nextFlushAt = millis() + 50;
+  else nextFlushAt = millis() + 15000;
+}
 
-  if (!e.pending) {
-    obHead = (obHead + 1) % OUTBOX_SIZE; obCount--;
-    nextFlushAt = millis() + 300;
-  } else {
-    nextFlushAt = millis() + 15000;   // повтор через 15 сек
+// ============================================================================
+// Аккумулятор: напряжение, %, прогноз времени работы
+// ============================================================================
+// Кривая разряда Li-ion: напряжение на банку под небольшой нагрузкой -> %
+static const float LI_V[] = { 3.30, 3.50, 3.60, 3.70, 3.80, 3.90, 4.00, 4.10, 4.20 };
+static const float LI_P[] = { 0,    5,    12,   27,   45,   62,   78,   90,   100  };
+
+float liionPct(float cellV) {
+  if (cellV <= LI_V[0]) return 0;
+  for (int i = 1; i < 9; i++)
+    if (cellV <= LI_V[i]) return LI_P[i - 1] + (LI_P[i] - LI_P[i - 1]) * (cellV - LI_V[i - 1]) / (LI_V[i] - LI_V[i - 1]);
+  return 100;
+}
+
+bool batEnabled() { return cfg.batPin >= 0; }
+
+int batPct() {
+  if (!batEnabled() || batV <= 0) return -1;
+  return (int)(liionPct(batV / (cfg.batCells ? cfg.batCells : 1)) + 0.5f);
+}
+
+// Прогноз: сколько секунд ещё проработает резерв (по скорости разряда за это отключение). -1 = мало данных
+long batEtaSec() {
+  int pct = batPct();
+  if (powerOn || pct < 0 || batRefPct < 0) return -1;
+  float elapsed = (millis() - batRefMs) / 1000.0f, drop = batRefPct - pct;
+  if (elapsed < 300 || drop < 2) return -1;
+  return (long)(pct / (drop / elapsed));
+}
+
+String batLine() {
+  int pct = batPct();
+  if (pct < 0) return "";
+  String s = "🔋 Резерв: " + String(pct) + "% (" + String(batV, 2) + " В)";
+  long eta = batEtaSec();
+  if (eta > 0) s += ", вистачить ~" + formatDuration(eta - eta % 60);
+  return s;
+}
+
+void sampleBattery() {
+  if (!batEnabled()) return;
+  static uint32_t last = 0;
+  if (millis() - last < 1000) return;
+  last = millis();
+  uint32_t mv = 0;
+  for (int i = 0; i < 8; i++) mv += analogReadMilliVolts(cfg.batPin);
+  float v = mv / 8 / 1000.0f * cfg.batDiv;
+  batV = batV <= 0 ? v : batV * 0.9f + v * 0.1f;   // сглаживание
+
+  if (!powerOn) {
+    // Первую минуту после пропадания сети не учитываем: напряжение "сползает" с уровня зарядки
+    if (batRefPct < 0 && millis() - batRefMs > 60000) { batRefPct = batPct(); batRefMs = millis(); }
+    int pct = batPct();
+    if (!batLowSent && pct >= 0 && pct <= cfg.batLow) {
+      batLowSent = true;
+      long eta = batEtaSec();
+      pushEvent(EV_BAT_LOW, pct, eta > 0 ? (uint32_t)eta : 0, T_OWNER | (cfg.webhookUrl.length() ? T_HOOK : 0));
+    }
   }
 }
 
@@ -471,6 +623,14 @@ void fillStatus(JsonDocument& d) {
   d["time_synced"] = timeValid();
   d["queue"]     = obCount;
   d["mqtt"]      = mqtt.connected();
+  if (batEnabled() && batV > 0) {
+    d["battery_pct"] = batPct();
+    d["battery_v"]   = roundf(batV * 100) / 100;
+    long eta = batEtaSec();
+    if (eta > 0) d["battery_eta_s"] = eta;
+  }
+  d["subscribers"] = subCount;
+  d["ota"] = esp_ota_get_next_update_partition(NULL) != NULL;
 }
 
 void mqttPublishState() {
@@ -520,6 +680,10 @@ void mqttDiscovery() {
   mqttDiscoveryOne("sensor", "outage_now", "Поточне відключення", "duration", "{{ value_json.outage_duration_s | default(0) }}", "s", nullptr);
   mqttDiscoveryOne("sensor", "down24", "Без світла за 24 год", "duration", "{{ value_json.downtime_24h_s }}", "s", nullptr);
   mqttDiscoveryOne("sensor", "adc", "Рівень АЦП", nullptr, "{{ value_json.adc }}", nullptr, "measurement");
+  if (batEnabled()) {
+    mqttDiscoveryOne("sensor", "battery", "Заряд резерву", "battery", "{{ value_json.battery_pct | default(0) }}", "%", "measurement");
+    mqttDiscoveryOne("sensor", "battery_v", "Напруга акумулятора", "voltage", "{{ value_json.battery_v | default(0) }}", "V", "measurement");
+  }
 }
 
 void mqttCallback(char* topic, byte* payload, unsigned int len) {
@@ -556,12 +720,29 @@ void mqttLoop() {
   if (millis() - lastAttr > 60000) { lastAttr = millis(); mqttPublishState(); }
 }
 
+// Пульс: периодически шлём полный статус на webhook (сервер-агрегатор понимает, что устройство живо)
+void heartbeatLoop() {
+  if (!cfg.hbMin || cfg.webhookUrl.isEmpty() || WiFi.status() != WL_CONNECTED) return;
+  static uint32_t last = 0;
+  static bool first = true;
+  if (!first && millis() - last < cfg.hbMin * 60000UL) return;
+  first = false;
+  last = millis();
+  JsonDocument d;
+  d["event"] = "heartbeat";
+  fillStatus(d);
+  d["interval_s"] = cfg.hbMin * 60;
+  String body; serializeJson(d, body);
+  httpPostJson(cfg.webhookUrl, body, "heartbeat");
+}
+
 // ============================================================================
 // Переходы состояния
 // ============================================================================
 void onPowerLost(bool notify) {
   powerOn = false; inOutage = true;
   offTs = nowTs(); offMs = millis(); offMsValid = true;
+  batRefMs = millis(); batRefPct = -1;
   outageCount++;
   prefs.putUInt("pwrOffTmstmp", offTs);
   prefs.putBool("lastUotDetect", true);
@@ -578,6 +759,7 @@ void onPowerRestored(bool afterReboot) {
   if (now && dur) addHistory(offTs ? offTs : now - dur, now);
 
   powerOn = true; inOutage = false;
+  batRefPct = -1; batLowSent = false;
   lastOutageDur = dur; totalDownSec += dur; powerOnSince = now;
   prefs.putBool("lastUotDetect", false);
   prefs.putUInt("totDown", totalDownSec);
@@ -622,6 +804,22 @@ void wifiWatchdog() {
 }
 
 // ============================================================================
+// OTA: обновление прошивки по ссылке на .bin
+// ============================================================================
+bool otaAvailable() { return esp_ota_get_next_update_partition(NULL) != NULL; }
+
+String otaFromUrl(const String& url) {
+  if (!otaAvailable()) return "❌ Немає OTA-розділу. Один раз прошийте кабелем зі схемою \"Minimal SPIFFS (1.9MB APP with OTA)\"";
+  httpUpdate.rebootOnUpdate(false);
+  t_httpUpdate_return r;
+  if (url.startsWith("https://")) { WiFiClientSecure c; c.setInsecure(); r = httpUpdate.update(c, url); }
+  else { WiFiClient c; r = httpUpdate.update(c, url); }
+  if (r == HTTP_UPDATE_OK) { restartAt = millis() + 2000; return "✅ Прошивку оновлено, перезапуск…"; }
+  if (r == HTTP_UPDATE_NO_UPDATES) return "ℹ️ Оновлень немає";
+  return "❌ Помилка оновлення: " + httpUpdate.getLastErrorString();
+}
+
+// ============================================================================
 // Telegram
 // ============================================================================
 String powerLine() {
@@ -643,6 +841,7 @@ String cmdLight() {
   }
   String s = "🔴 <b>СВІТЛА НЕМАЄ :(</b>\n\n⏱ Тривалість відключення: " + formatDuration(currentOutageSec());
   if (offTs) s += "\n🕐 Час відключення: " + fmtTs(offTs, "%d.%m %H:%M");
+  if (batPct() >= 0) s += "\n" + batLine();
   return s;
 }
 
@@ -650,6 +849,10 @@ String cmdStatus() {
   String s = "📟 <b>" + htmlEscape(cfg.name) + "</b> — стан системи\n\n" + powerLine() + "\n\n";
   s += "📊 Відключень: " + String(outageCount) + " (за 24 год: " + formatDuration(downtimeWindow(86400)) + " без світла)\n";
   s += "🔌 АЦП: " + String(lastAdc) + " (поріг " + String(cfg.thrOn) + "/" + String(cfg.thrOff) + ")\n";
+  if (batEnabled()) s += batLine() + "\n";
+  if (subCount) s += "👥 Підписників: " + String(subCount) + "\n";
+  if (cfg.hbMin) s += "💓 Пульс: кожні " + String(cfg.hbMin) + " хв\n";
+  s += "⬆️ OTA: " + String(otaAvailable() ? "доступно" : "немає розділу") + "\n";
   s += "📶 WiFi: " + String(WiFi.RSSI()) + " dBm, IP " + WiFi.localIP().toString() + "\n";
   s += "🔗 MQTT: " + String(cfg.mqttHost.isEmpty() ? "вимкнено" : mqtt.connected() ? "підключено" : "немає з'єднання");
   s += " | Webhook: " + String(cfg.webhookUrl.isEmpty() ? "вимкнено" : "увімкнено") + "\n";
@@ -697,7 +900,9 @@ String cmdHelp(const String& who) {
     "<b>Для всіх (група):</b>\n"
     "/light — є світло чи ні\n"
     "/history — останні відключення\n"
-    "/stats — статистика\n\n"
+    "/stats — статистика\n"
+    "/subscribe — підписатися на сповіщення\n"
+    "/unsubscribe — відписатися\n\n"
     "<b>Власник:</b>\n"
     "/status — стан системи\n"
     "/adc — поточне значення АЦП (калібрування)\n"
@@ -711,6 +916,12 @@ String cmdHelp(const String& who) {
     "   змінні: {time} {date} {datetime} {duration} {off_time} {count} {name}\n"
     "/webhook URL | off — HTTP-сповіщення\n"
     "/mqtt host [port] [user] [pass] | off\n"
+    "/heartbeat 10 | 0 — пульс на webhook кожні N хв\n"
+    "/battery — стан акумулятора\n"
+    "/bat_pin 4 | off, /bat_div 2.0, /bat_cal 4.05, /bat_cells 1, /bat_low 20\n"
+    "/subs — підписники; /subs open | closed\n"
+    "/sub_add ID, /sub_del ID\n"
+    "/update URL — оновити прошивку (.bin) по Wi-Fi\n"
     "/web — адреса веб-панелі та ключ API\n"
     "/newkey — згенерувати новий ключ API\n"
     "/test — тестове сповіщення у всі канали\n"
@@ -726,6 +937,8 @@ void setBotCommands() {
                 "{\"command\":\"status\",\"description\":\"Стан системи\"},"
                 "{\"command\":\"history\",\"description\":\"Останні відключення\"},"
                 "{\"command\":\"stats\",\"description\":\"Статистика\"},"
+                "{\"command\":\"subscribe\",\"description\":\"Підписатися на сповіщення\"},"
+                "{\"command\":\"battery\",\"description\":\"Стан акумулятора\"},"
                 "{\"command\":\"web\",\"description\":\"Веб-панель і API\"},"
                 "{\"command\":\"help\",\"description\":\"Усі команди\"}]";
   if (bot.setMyCommands(cmds)) prefs.putString("cmdVer", FW_VERSION);
@@ -753,13 +966,38 @@ void handleMessage(telegramMessage& m) {
     sendTg(chat, reply);
     return;
   }
-  if (!isAdmin && !isGroup) return;                 // чужие чаты игнорируем
+  bool isSub = findSub(chat) >= 0;
+
+  // ---- Подписка (доступна любому) ----
+  if (cmd == "/subscribe") {
+    if (isGroup || chat == cfg.chatId) reply = "Цей чат і так отримує сповіщення ✅";
+    else if (isSub) reply = "Ви вже підписані ✅ Відписатися: /unsubscribe";
+    else if (cfg.subsOpen) {
+      if (addSub(chat)) reply = "✅ Ви підписалися на сповіщення про світло (" + htmlEscape(cfg.name) + ").\nКоманди: /light /history /stats\nВідписатися: /unsubscribe";
+      else reply = "❌ Досягнуто ліміт підписників";
+    } else {
+      static String lastReq;
+      reply = "📨 Запит надіслано власнику. Ваш ID: <code>" + chat + "</code>";
+      if (lastReq != chat) {                          // защита от спама одинаковыми запросами
+        lastReq = chat;
+        sendTg(cfg.chatId, "👤 " + htmlEscape(m.from_name) + " хоче підписатися на сповіщення.\nДодати: /sub_add " + chat);
+      }
+    }
+    sendTg(chat, reply);
+    return;
+  }
+  if (cmd == "/unsubscribe") {
+    sendTg(chat, delSub(chat) ? "🔕 Ви відписалися" : "Ви не були підписані");
+    return;
+  }
+
+  if (!isAdmin && !isGroup && !isSub) return;       // чужие чаты игнорируем
 
   // ---- Публичные команды ----
   if (text == "Світло є чи нема?" || cmd == "/light" || cmd == "/svitlo") reply = cmdLight();
   else if (cmd == "/history") reply = cmdHistory(args.toInt());
   else if (cmd == "/stats")   reply = cmdStats();
-  else if (cmd == "/help")    reply = isAdmin ? cmdHelp(m.from_name) : String("Доступно: /light /history /stats");
+  else if (cmd == "/help")    reply = isAdmin ? cmdHelp(m.from_name) : String("Доступно: /light /history /stats /subscribe /unsubscribe");
   else if (!isAdmin) return;                        // остальное — только владельцу
 
   // ---- Команды владельца ----
@@ -863,6 +1101,78 @@ void handleMessage(telegramMessage& m) {
             "• GET /api/status — JSON стан\n• GET /api/history — історія\n• GET /metrics — Prometheus\n\n"
             "API з ключем (заголовок X-Api-Key):\n• POST /api/test\n• POST /api/restart";
   }
+  else if (cmd == "/battery") {
+    if (!batEnabled()) reply = "🔋 Моніторинг акумулятора вимкнено.\nУвімкнути: /bat_pin 4 (вхід АЦП через дільник напруги, див. README)";
+    else {
+      reply = batLine() + "\n\nПін: GPIO" + String(cfg.batPin) + ", дільник ×" + String(cfg.batDiv, 3) +
+              ", Li-ion " + String(cfg.batCells) + "S, попередження при " + String(cfg.batLow) + "%\n"
+              "Калібрування: виміряйте напругу мультиметром і надішліть /bat_cal 4.05";
+    }
+  }
+  else if (cmd == "/bat_pin") {
+    if (args == "off") { cfg.batPin = -1; reply = "🔋 Моніторинг акумулятора вимкнено"; }
+    else {
+      int p = args.toInt();
+      if (args.length() && p >= 0 && p <= 4 && p != READ_PIN) { cfg.batPin = p; batV = 0; reply = "✅ Акумулятор на GPIO" + String(p) + "\nПеревірте: /battery"; }
+      else reply = "Формат: /bat_pin 4 (GPIO 0…4, крім " + String(READ_PIN) + ")";
+    }
+    prefs.putChar("batPin", cfg.batPin);
+    mqtt.disconnect(); mqttLastTry = 0;               // перепубликуем discovery
+  }
+  else if (cmd == "/bat_div") {
+    float v = args.toFloat();
+    if (v >= 1 && v <= 20) { cfg.batDiv = v; batV = 0; prefs.putFloat("batDiv", v); reply = "✅ Дільник ×" + String(v, 3); }
+    else reply = "Формат: /bat_div 2.0  — (R1+R2)/R2";
+  }
+  else if (cmd == "/bat_cal") {
+    float real = args.toFloat();
+    if (batEnabled() && batV > 0.5 && real > 0.5 && real < 60) {
+      cfg.batDiv *= real / batV; batV = real;
+      prefs.putFloat("batDiv", cfg.batDiv);
+      reply = "✅ Відкалібровано: дільник ×" + String(cfg.batDiv, 3);
+    } else reply = "Формат: /bat_cal 4.05 — реальна напруга з мультиметра (моніторинг має бути увімкнено)";
+  }
+  else if (cmd == "/bat_cells") {
+    int n = args.toInt();
+    if (n >= 1 && n <= 4) { cfg.batCells = n; prefs.putUChar("batCells", n); reply = "✅ Li-ion " + String(n) + "S"; }
+    else reply = "Формат: /bat_cells 1 (1…4)";
+  }
+  else if (cmd == "/bat_low") {
+    int n = args.toInt();
+    if (n >= 5 && n <= 80) { cfg.batLow = n; prefs.putUChar("batLow", n); reply = "✅ Попередження при " + String(n) + "%"; }
+    else reply = "Формат: /bat_low 20 (5…80)";
+  }
+  else if (cmd == "/subs") {
+    if (args == "open" || args == "closed") { cfg.subsOpen = args == "open"; prefs.putBool("subsOpen", cfg.subsOpen); }
+    reply = "👥 Підписників: " + String(subCount) + "/" + String(MAX_SUBS) + "\nРежим: " +
+            String(cfg.subsOpen ? "відкритий (будь-хто через /subscribe)" : "за схваленням власника") + "\n";
+    for (uint8_t i = 0; i < subCount; i++) reply += "• <code>" + subs[i] + "</code>\n";
+    reply += "\n/subs open | /subs closed\n/sub_add ID, /sub_del ID";
+  }
+  else if (cmd == "/sub_add") {
+    if (addSub(args)) {
+      reply = "✅ Додано " + htmlEscape(args);
+      sendTg(args, "✅ Вас підписано на сповіщення про світло (" + htmlEscape(cfg.name) + ").\nВідписатися: /unsubscribe");
+    } else reply = "Не вдалося: порожній ID, вже є або ліміт " + String(MAX_SUBS);
+  }
+  else if (cmd == "/sub_del") reply = delSub(args) ? "🗑 Видалено" : "Такого підписника немає";
+  else if (cmd == "/heartbeat") {
+    if (args.length()) {
+      long v = args.toInt();
+      if (v >= 0 && v <= 1440) { cfg.hbMin = v; prefs.putUShort("hbMin", v); }
+    }
+    if (cfg.hbMin) reply = "💓 Пульс на webhook кожні " + String(cfg.hbMin) + " хв";
+    else reply = "💓 Пульс вимкнено. Увімкнути: /heartbeat 10 (потрібен /webhook)";
+  }
+  else if (cmd == "/update") {
+    if (!args.startsWith("http")) {
+      reply = "Формат: /update https://example.com/firmware.bin\nАбо відкрийте http://" + WiFi.localIP().toString() +
+              "/update (логін admin, пароль — ключ API з /web)";
+    } else {
+      sendTg(chat, "⏳ Завантажую прошивку…");
+      reply = otaFromUrl(args);
+    }
+  }
   else if (cmd == "/newkey") { cfg.apiKey = randomKey(); prefs.putString("apiKey", cfg.apiKey); reply = "🔑 Новий ключ API: <code>" + cfg.apiKey + "</code>"; }
   else if (cmd == "/test")   { pushEvent(EV_TEST, 0, 0, defaultTargets()); reply = "🧪 Тест поставлено в чергу (Telegram/група/webhook)"; }
   else if (cmd == "/clear_stats") { clearStats(); reply = "🧹 Статистику очищено"; }
@@ -947,10 +1257,18 @@ String settingsPage(bool portal) {
        "</div><div>" + inputField("до", "qTo", cfg.quietTo >= 0 ? String(cfg.quietTo) : String(""), "number") + "</div></div>";
   s += "</div>";
 
+  s += "<div class='card'><h2>🔋 Акумулятор</h2>";
+  s += "<div class='row'><div>" + inputField("GPIO дільника (порожньо = вимк.)", "batPin", cfg.batPin >= 0 ? String(cfg.batPin) : String(""), "number") +
+       "</div><div>" + inputField("Коефіцієнт дільника", "batDiv", String(cfg.batDiv, 3)) + "</div></div>";
+  s += "<div class='row'><div>" + inputField("Li-ion банок (1-4)", "batCells", String(cfg.batCells), "number") +
+       "</div><div>" + inputField("Попередження, %", "batLow", String(cfg.batLow), "number") + "</div></div>";
+  if (batEnabled()) s += "<div class='hint'>Зараз: " + String(batV, 2) + " В, " + String(batPct()) + "%</div>";
+  s += "</div>";
+
   s += "<div class='card'><h2>💬 Шаблони повідомлень</h2>";
   s += "<label>Світло вимкнули</label><textarea name='msgOff'>" + htmlEscape(cfg.msgOff) + "</textarea>";
   s += "<label>Світло з'явилося</label><textarea name='msgOn'>" + htmlEscape(cfg.msgOn) + "</textarea>";
-  s += "<div class='hint'>Змінні: {time} {date} {datetime} {duration} {off_time} {count} {name}. HTML Telegram: &lt;b&gt;, &lt;i&gt;.</div></div>";
+  s += "<div class='hint'>Змінні: {time} {date} {datetime} {duration} {off_time} {count} {name} {battery}. HTML Telegram: &lt;b&gt;, &lt;i&gt;.</div></div>";
 
   s += "<div class='card'><h2>🔗 Інтеграції</h2>";
   s += inputField("Webhook URL (POST JSON)", "hook", cfg.webhookUrl, "url", "https://... (n8n, Make, Zapier, власний сервер)");
@@ -959,6 +1277,9 @@ String settingsPage(bool portal) {
   s += "<div class='row'><div>" + inputField("MQTT логін", "mqUser", cfg.mqttUser) + "</div><div>" +
        inputField("MQTT пароль", "mqPass", "", "password", "порожньо — без змін") + "</div></div>";
   s += inputField("MQTT базовий топік", "mqBase", cfg.mqttBase);
+  s += inputField("Пульс на webhook, хв (0 = вимк.)", "hbMin", String(cfg.hbMin), "number");
+  s += "<label><input type='checkbox' name='subsOpen' value='1' style='width:auto'" + String(cfg.subsOpen ? " checked" : "") +
+       "> Відкрита підписка (/subscribe без схвалення власника)</label>";
   s += "</div>";
 
   if (!portal) {
@@ -1035,6 +1356,25 @@ void handleSettingsSave(bool portal) {
     if (p && p != cfg.mqttPort) { cfg.mqttPort = p; prefs.putUShort("mqPort", p); mqttChanged = true; }
   }
 
+  if (server.hasArg("batPin")) {
+    String p = server.arg("batPin"); p.trim();
+    int v = p.length() ? p.toInt() : -1;
+    if (v < 0 || v > 4 || v == READ_PIN) v = -1;
+    if (v != cfg.batPin) { cfg.batPin = v; batV = 0; prefs.putChar("batPin", v); mqttChanged = true; }
+  }
+  if (server.hasArg("batDiv")) {
+    float v = server.arg("batDiv").toFloat();
+    if (v >= 1 && v <= 20 && v != cfg.batDiv) { cfg.batDiv = v; batV = 0; prefs.putFloat("batDiv", v); }
+  }
+  if (server.hasArg("batCells")) { int v = server.arg("batCells").toInt(); if (v >= 1 && v <= 4) { cfg.batCells = v; prefs.putUChar("batCells", v); } }
+  if (server.hasArg("batLow"))   { int v = server.arg("batLow").toInt();   if (v >= 5 && v <= 80) { cfg.batLow = v; prefs.putUChar("batLow", v); } }
+  if (server.hasArg("hbMin")) {                     // поле есть в форме -> форма отправлена целиком
+    long v = server.arg("hbMin").toInt();
+    if (v >= 0 && v <= 1440) { cfg.hbMin = v; prefs.putUShort("hbMin", v); }
+    cfg.subsOpen = server.hasArg("subsOpen");
+    prefs.putBool("subsOpen", cfg.subsOpen);
+  }
+
   if (cfg.ssid.isEmpty() || cfg.botToken.isEmpty() || cfg.chatId.isEmpty()) {
     server.send(400, "text/html; charset=utf-8", String(FPSTR(PAGE_HEAD)) +
       "<main><div class='card'><h2>⚠️ Заповніть Wi-Fi, Bot Token і Chat ID</h2><a href='/'>← Назад</a></div></main></body></html>");
@@ -1060,7 +1400,7 @@ static const char DASH_BODY[] PROGMEM = R"rawliteral(
 <div id="big" class="big" style="background:#888">…</div>
 <div class="card" id="kv"></div>
 <div class="card"><h2>Останні відключення</h2><div id="hist"></div></div>
-<p class="hint" style="text-align:center"><a href="/settings">⚙️ Налаштування</a> · <a href="/api/status">/api/status</a> · <a href="/api/history">/api/history</a> · <a href="/metrics">/metrics</a></p>
+<p class="hint" style="text-align:center"><a href="/settings">⚙️ Налаштування</a> · <a href="/update">⬆️ Оновлення</a> · <a href="/api/status">/api/status</a> · <a href="/api/history">/api/history</a> · <a href="/metrics">/metrics</a></p>
 </main><script>
 function d(s){s=s|0;var h=Math.floor(s/3600),m=Math.floor(s%3600/60);return h?h+' год '+m+' хв':m+' хв '+(s%60)+' с'}
 function t(ts){if(!ts)return'—';var x=new Date(ts*1000);return x.toLocaleString('uk-UA',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}
@@ -1073,7 +1413,7 @@ async function upd(){try{
  document.getElementById('sub').textContent=s.power?('з '+t(s.power_since)):('вже '+d(s.outage_duration_s)+' (з '+t(s.outage_started)+')');
  document.getElementById('kv').innerHTML=kv('Відключень всього',s.outages_total)+kv('Без світла за 24 год',d(s.downtime_24h_s))+
   kv('Без світла за 7 днів',d(s.downtime_7d_s))+kv('АЦП',s.adc+' ('+s.thr_on+'/'+s.thr_off+')')+kv('Wi-Fi',s.rssi+' dBm')+
-  kv('MQTT',s.mqtt?'так':'ні')+kv('Аптайм',d(s.uptime_s))+kv('Прошивка','v'+s.version);
+  kv('MQTT',s.mqtt?'так':'ні')+(s.battery_pct!=null?kv('Резерв',s.battery_pct+'% · '+s.battery_v+' В'+(s.battery_eta_s?' · ~'+d(s.battery_eta_s):'')):'')+kv('Аптайм',d(s.uptime_s))+kv('Прошивка','v'+s.version);
  var h=await (await fetch('/api/history')).json(),o='';
  h.forEach(function(r){o+=kv(t(r.off)+' → '+t(r.on),d(r.duration_s))});
  document.getElementById('hist').innerHTML=o||'<span class="hint">Поки що немає</span>';
@@ -1115,6 +1455,11 @@ void handleMetrics() {
   s += "# TYPE lightwatcher_wifi_rssi_dbm gauge\nlightwatcher_wifi_rssi_dbm" + l + " " + String(WiFi.RSSI()) + "\n";
   s += "# TYPE lightwatcher_uptime_seconds gauge\nlightwatcher_uptime_seconds" + l + " " + String(millis() / 1000) + "\n";
   s += "# TYPE lightwatcher_outbox_queue gauge\nlightwatcher_outbox_queue" + l + " " + String(obCount) + "\n";
+  s += "# TYPE lightwatcher_subscribers gauge\nlightwatcher_subscribers" + l + " " + String(subCount) + "\n";
+  if (batEnabled() && batV > 0) {
+    s += "# TYPE lightwatcher_battery_percent gauge\nlightwatcher_battery_percent" + l + " " + String(batPct()) + "\n";
+    s += "# TYPE lightwatcher_battery_volts gauge\nlightwatcher_battery_volts" + l + " " + String(batV, 3) + "\n";
+  }
   server.send(200, "text/plain; version=0.0.4", s);
 }
 
@@ -1138,6 +1483,7 @@ void setupWeb() {
     server.send(200, "application/json", "{\"ok\":true}");
     restartAt = millis() + 1000;
   });
+  httpUpdater.setup(&server, "/update", "admin", cfg.apiKey);   // веб-OTA: загрузка .bin через браузер
   server.onNotFound([]() { server.send(404, "text/plain", "Not found"); });
   server.begin();
 }
@@ -1237,7 +1583,8 @@ void setup() {
     launchPortal(5UL * 60 * 1000);
   }
 
-  // Начальное состояние сети
+  // Начальное состояние сети и аккумулятора
+  sampleBattery();
   lastAdc = readAdcAvg();
   rawPower = lastAdc >= cfg.thrOff;        // между порогами считаем, что свет есть
   rawChangedAt = millis();
@@ -1261,6 +1608,13 @@ void setup() {
   // Сервисы локальной сети
   if (MDNS.begin(cfg.host.c_str())) MDNS.addService("http", "tcp", 80);
   setupWeb();
+  // OTA из Arduino IDE по сети (порт 3232, пароль = ключ API)
+  ArduinoOTA.setHostname(cfg.host.c_str());
+  ArduinoOTA.setPassword(cfg.apiKey.c_str());
+  ArduinoOTA.onStart([]() {
+    if (mqtt.connected()) mqtt.publish((cfg.mqttBase + "/availability").c_str(), "offline", true);
+  });
+  ArduinoOTA.begin();
   mqtt.setBufferSize(1024);
   mqtt.setCallback(mqttCallback);
 
@@ -1277,11 +1631,14 @@ void loop() {
     else onPowerLost(true);
   }
 
+  sampleBattery();
   checkTimeSync();
   wifiWatchdog();
   server.handleClient();
+  ArduinoOTA.handle();
   flushOutbox();
   mqttLoop();
+  heartbeatLoop();
   handleTelegram();
 
   if (restartAt && due(restartAt)) {
@@ -1301,4 +1658,6 @@ v2.0 (14.11.2026) - Интеграции (HTTP API, Prometheus, Webhook, MQTT/Ho
                     очередь уведомлений, гистерезис+антидребезг, история и статистика,
                     кастомизация (шаблоны, пороги, тихие часы, имя), авто-DST,
                     исправлены ошибки v1.6 (см. README.md).
+v2.1 (14.11.2026) - Мониторинг аккумулятора с прогнозом, подписка жильцов,
+                    heartbeat для сервера-агрегатора, OTA (веб, IDE, Telegram).
 */

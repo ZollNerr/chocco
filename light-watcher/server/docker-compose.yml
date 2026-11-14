@@ -1,0 +1,15 @@
+services:
+  hub:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/data
+    environment:
+      LW_INGEST_KEY: ${LW_INGEST_KEY:?set LW_INGEST_KEY in .env}
+      LW_ADMIN_KEY: ${LW_ADMIN_KEY:?set LW_ADMIN_KEY in .env}
+      LW_TZ: Europe/Kyiv
+      LW_PUBLIC: "1"
+      LW_TG_TOKEN: ${LW_TG_TOKEN:-}
+      LW_TG_CHAT: ${LW_TG_CHAT:-}
