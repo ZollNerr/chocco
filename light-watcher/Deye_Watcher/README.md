@@ -26,7 +26,20 @@
 Другие подходящие платы — на экранированных модулях Espressif: ESP32‑C3‑DevKitM‑1 ([printec, 212 грн](https://printec.com.ua/dev-board-esp32-c3-devkitm-1/)), ESP32‑DevKitC WROOM‑32U Type‑C (~300 грн на [Prom](https://prom.ua/ua/Esp32-wroom-32u.html)).
 ⚠️ **ESP32‑C3 SuperMini не рекомендую:** антенна стоит рядом с кварцем, слабый стабилизатор ([Reddit](https://www.reddit.com/r/esp32/comments/1r37gmk/esp32c3_super_minis_wifi_not_working/)). Если уже есть — `WIFI_TX_LIMIT = true`.
 
-### Схема подключения
+### Вариант «шнурок» — без корпуса, в термоусадке (самый простой)
+![Шнурок в термоусадке](cord_build.png)
+
+Зарядка USB‑A в розетку резервного выхода → кабель USB‑A → USB‑C → плата + гибкая FPC‑антенна под прозрачной термоусадкой ⌀30 мм.
+| Что | Цена | Где |
+|---|---|---|
+| Антенна FPC 2.4 ГГц 5 dBi, 45×10 мм, U.FL (вместо штыревой) | 31,21 грн | [printec.com.ua](https://printec.com.ua/ru/ant-5dbi-45x10-fpc-ipex/) |
+| Зарядка Grand‑X CH‑03B, 5 В 2,1 А, USB‑A | 118 грн | [elmir.ua](https://elmir.ua/ua/mobile_chargers/network_c_a_usb_grand-x_2_1a_black_ch-03b.html) |
+| Кабель AM USB 2.0 → Type‑C, 0,8 м (с передачей данных) | 123 грн | [arduino.ua](https://arduino.ua/prod4026-kabel-am-usb-2-0-type-c-0-8m-gold-plated) |
+| Термоусадка 30 мм 2:1, прозрачная, 1 м (Reliance) | 59 грн | [domelectrici.com](https://domelectrici.com/elektrofurnitura/termousadochnaya-trubka-kembrik/termousadka-standart-bez-kleya-20-mm) |
+
+С платой за 567 грн итого **≈ 898 грн**. Гребёнки пинов не впаивайте — плата останется плоской. Антенну кладите **продолжением платы**, на 2+ см за её краем. «Шнурок» держите **вне металлического щита**.
+
+### Схема подключения (вариант в корпусе со штыревой антенной)
 ![Подключение антенны и платы](antenna_wiring.png)
 
 ### Настройки Arduino IDE для ESP32‑S3 N16R8
