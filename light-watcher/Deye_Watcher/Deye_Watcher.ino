@@ -13,7 +13,8 @@
   https://github.com/kellerza/sunsynk/blob/main/src/sunsynk/definitions/three_phase_hv.py
 Протокол логгера: https://github.com/jmccrohan/pysolarmanv5
 
-Железо: любая плата ESP32 (ESP32-C3 SuperMini или ESP32 DevKit) + USB-блок 5 В.
+Железо: плата ESP32 на экранированном модуле (ESP32-C3-DevKitM-1, ESP32 DevKit WROOM-32/32U) + USB-блок 5 В.
+ESP32-C3 SuperMini тоже работает, но с WIFI_TX_LIMIT = true (см. ниже).
 Питать от резервного выхода инвертора, чтобы работало при отключениях (роутер — тоже от резерва).
 
 Библиотеки (Arduino IDE → Library Manager): UniversalTelegramBot 1.3.0, ArduinoJson 7.x.
@@ -49,6 +50,10 @@ const uint8_t  MODBUS_ID   = 1;
 const uint32_t POLL_MS     = 10000;                 // опрос инвертора, мс (не чаще 5000)
 const bool     ENERGY_WHOLE_KWH = false;            // true, если прошивка MAIN >= 1098 (у вас 1066 → false)
 const char*    TZ_INFO     = "EET-2EEST,M3.5.0/3,M10.5.0/4";  // Киев, авто летнее время
+// true только для ESP32-C3 SuperMini: у неё антенна рядом с кварцем и слабый стабилизатор,
+// на полной мощности Wi-Fi не подключается. 8.5 dBm — известный обходной путь (меньше дальность).
+// Для плат на модулях (ESP32-C3-DevKitM-1, DevKit WROOM-32) оставьте false.
+const bool     WIFI_TX_LIMIT = false;
 
 // ============================================================================
 // Регистры (трёхфазный HV Deye)
@@ -411,6 +416,7 @@ void setup() {
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
+  if (WIFI_TX_LIMIT) WiFi.setTxPower(WIFI_POWER_8_5dBm);
   for (int i = 0; i < 40 && WiFi.status() != WL_CONNECTED; i++) { delay(500); Serial.print("."); }
   Serial.println(WiFi.status() == WL_CONNECTED ? String(" Wi-Fi OK, IP " + WiFi.localIP().toString()) : String(" нет Wi-Fi"));
 

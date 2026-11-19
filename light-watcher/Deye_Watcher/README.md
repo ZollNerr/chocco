@@ -15,11 +15,14 @@
 ## Что купить
 | Что | Цена | Где |
 |---|---|---|
-| **ESP32‑C3 SuperMini** (рекомендую) | 143–170 грн | [mini-tech.com.ua](https://www.mini-tech.com.ua/ua/esp32-c3) · [electrochip.mk.ua](https://electrochip.mk.ua/product/modul-rozrobnyka-esp32-c3-supermini/) · [ardushop.in.ua](https://ardushop.in.ua/arduino/esp32-c3-supermini-esp32-development-board-wi-fi-bluetooth) (есть версия с внешней антенной, 185 грн) · [Prom](https://prom.ua/ua/p2681772438-esp32-supermini-kompaktnaya.html) |
-| или **ESP32 DevKit V1** — лучше антенна, если роутер далеко | 229–290 грн | [robostore.com.ua](https://robostore.com.ua/nalahodzhuvalna-plata-esp-32-devkit-v1/) · [ardushop.in.ua](https://ardushop.in.ua/arduino/developer-board-esp-wroom-32-esp-32-wi-fi-bluetooth) |
-| USB‑блок 5 В 1 А + кабель USB‑C (или micro‑USB для DevKit) **с передачей данных** | ~120–160 грн | любой магазин, подойдёт зарядка от телефона |
+| **ESP32‑C3‑DevKitM‑1** — модуль ESP32‑C3‑MINI‑1 под экраном (рекомендую) | 212,66 грн | [printec.com.ua](https://printec.com.ua/dev-board-esp32-c3-devkitm-1/) |
+| **ESP32 DevKitC WROOM‑32U** — разъём под внешнюю антенну, если логгер далеко от роутера | 283 грн | [beegreen.com.ua](https://beegreen.com.ua/plata-rozrobki-esp32-devkitc-wroom-32u-z-ipx-16843) (антенну IPX 2.4 ГГц докупить) |
+| **ESP32 DevKit V1 (WROOM‑32)** | 290 грн | [robostore.com.ua](https://robostore.com.ua/nalahodzhuvalna-plata-esp-32-devkit-v1/) |
+| USB‑блок 5 В 1 А + кабель **с передачей данных** | ~120–160 грн | подойдёт зарядка от телефона |
 
-**Итого ≈ 300 грн.** Питать от **резервного выхода инвертора**, как и Wi‑Fi роутер, иначе при отключении всё выключится.
+⚠️ **ESP32‑C3 SuperMini не рекомендую:** чип без экранированного модуля, антенна рядом с кварцем, слабый стабилизатор — Wi‑Fi часто не подключается ([Reddit](https://www.reddit.com/r/esp32/comments/1r37gmk/esp32c3_super_minis_wifi_not_working/), [Arduino Project Hub](https://projecthub.arduino.cc/tarantula3/esp32-c3-super-mini-wifi-fix-3-methods-that-work-866a5e)). Если уже купили — поставьте `WIFI_TX_LIMIT = true` (мощность 8,5 dBm, меньше дальность).
+
+**Итого ≈ 350–450 грн.** Питать от **резервного выхода инвертора**, как и Wi‑Fi роутер, иначе при отключении всё выключится.
 
 ## Установка за 15 минут
 1. **IP логгера.** Откройте список клиентов в роутере и найдите логгер (MAC начинается на D4:27:87). Сделайте для него **резервирование адреса (DHCP reservation)**, чтобы IP не менялся.
