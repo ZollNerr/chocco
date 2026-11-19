@@ -26,6 +26,9 @@
 Другие подходящие платы — на экранированных модулях Espressif: ESP32‑C3‑DevKitM‑1 ([printec, 212 грн](https://printec.com.ua/dev-board-esp32-c3-devkitm-1/)), ESP32‑DevKitC WROOM‑32U Type‑C (~300 грн на [Prom](https://prom.ua/ua/Esp32-wroom-32u.html)).
 ⚠️ **ESP32‑C3 SuperMini не рекомендую:** антенна стоит рядом с кварцем, слабый стабилизатор ([Reddit](https://www.reddit.com/r/esp32/comments/1r37gmk/esp32c3_super_minis_wifi_not_working/)). Если уже есть — `WIFI_TX_LIMIT = true`.
 
+### Схема подключения
+![Подключение антенны и платы](antenna_wiring.png)
+
 ### Настройки Arduino IDE для ESP32‑S3 N16R8
 | Пункт меню Tools | Значение |
 |---|---|
