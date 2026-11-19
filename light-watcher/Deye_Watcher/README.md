@@ -9,20 +9,33 @@
 
 Облако Deye и приложение Solarman продолжают работать. К инвертору ничего не подключается, прошивка **только читает** регистры.
 
-Проверено на: Deye **SUN‑30K‑SG01HP3** (трёхфазный HV), логгер **LSW‑3**, серийник 29xxxxxxxx.
+Плата: **ESP32‑S3 WROOM‑1U с внешней антенной** (подойдёт любая ESP32 на модуле). Инвертор: Deye **SUN‑30K‑SG01HP3** (трёхфазный HV), логгер **LSW‑3**, серийник 29xxxxxxxx.
 Для логгеров с серийником на 26 (закрытый локальный доступ) нужен кабель RS‑485 — см. [README.md](../README.md), раздел про шлюз инвертора.
 
-## Что купить
+## Что купить (выбранный комплект)
 | Что | Цена | Где |
 |---|---|---|
-| **ESP32‑C3‑DevKitM‑1** — модуль ESP32‑C3‑MINI‑1 под экраном (рекомендую) | 212,66 грн | [printec.com.ua](https://printec.com.ua/dev-board-esp32-c3-devkitm-1/) |
-| **ESP32 DevKitC WROOM‑32U** — разъём под внешнюю антенну, если логгер далеко от роутера | 283 грн | [beegreen.com.ua](https://beegreen.com.ua/plata-rozrobki-esp32-devkitc-wroom-32u-z-ipx-16843) (антенну IPX 2.4 ГГц докупить) |
-| **ESP32 DevKit V1 (WROOM‑32)** | 290 грн | [robostore.com.ua](https://robostore.com.ua/nalahodzhuvalna-plata-esp-32-devkit-v1/) |
-| USB‑блок 5 В 1 А + кабель **с передачей данных** | ~120–160 грн | подойдёт зарядка от телефона |
+| **ESP32‑S3 DevKitC‑1 N16R8, модуль ESP32‑S3‑WROOM‑1U** (разъём IPEX/U.FL под внешнюю антенну), 2× USB Type‑C, гарантия 4 мес. | 567,05 грн | [printec.ua](https://printec.ua/ua/p3039085903-plata-razrabotki-esp32.html) (в наличии 50 шт на 19.11.2026) |
+| **Антенна Wi‑Fi 2.4 ГГц 3 dBi**, RP‑SMA, кабель IPX ~14 см | 59 грн | [arduino.ua](https://arduino.ua/ru/prod5634-antena-wi-fi-2-4ggc-3dbi-rp-sma-plug-ipx) |
+| USB‑блок 5 В 1 А + кабель USB‑C **с передачей данных** | ~120–160 грн | подойдёт зарядка от телефона |
 
-⚠️ **ESP32‑C3 SuperMini не рекомендую:** чип без экранированного модуля, антенна рядом с кварцем, слабый стабилизатор — Wi‑Fi часто не подключается ([Reddit](https://www.reddit.com/r/esp32/comments/1r37gmk/esp32c3_super_minis_wifi_not_working/), [Arduino Project Hub](https://projecthub.arduino.cc/tarantula3/esp32-c3-super-mini-wifi-fix-3-methods-that-work-866a5e)). Если уже купили — поставьте `WIFI_TX_LIMIT = true` (мощность 8,5 dBm, меньше дальность).
+**Итого ≈ 750–790 грн.** Питать от **резервного выхода инвертора**, как и Wi‑Fi роутер.
 
-**Итого ≈ 350–450 грн.** Питать от **резервного выхода инвертора**, как и Wi‑Fi роутер, иначе при отключении всё выключится.
+⚠️ **Антенну подключить ДО первого включения.** Модуль «U» без антенны почти не ловит, а передатчику без нагрузки вредно. Плату можно ставить в щит, а антенну вывести **наружу**: металлический щит глушит сигнал.
+
+Другие подходящие платы — на экранированных модулях Espressif: ESP32‑C3‑DevKitM‑1 ([printec, 212 грн](https://printec.com.ua/dev-board-esp32-c3-devkitm-1/)), ESP32‑DevKitC WROOM‑32U Type‑C (~300 грн на [Prom](https://prom.ua/ua/Esp32-wroom-32u.html)).
+⚠️ **ESP32‑C3 SuperMini не рекомендую:** антенна стоит рядом с кварцем, слабый стабилизатор ([Reddit](https://www.reddit.com/r/esp32/comments/1r37gmk/esp32c3_super_minis_wifi_not_working/)). Если уже есть — `WIFI_TX_LIMIT = true`.
+
+### Настройки Arduino IDE для ESP32‑S3 N16R8
+| Пункт меню Tools | Значение |
+|---|---|
+| Board | **ESP32S3 Dev Module** |
+| Flash Size | 16MB (128Mb) |
+| PSRAM | Disabled (прошивке не нужна; для N16R8 можно OPI PSRAM) |
+| USB CDC On Boot | Disabled — если прошиваете через разъём **COM/UART** |
+| Port | разъём с подписью **COM** (или UART) — через мост CH343P, самый простой путь |
+
+Если плата не прошивается, зажмите **BOOT**, нажмите и отпустите **RST**, отпустите BOOT — и повторите загрузку.
 
 ## Установка за 15 минут
 1. **IP логгера.** Откройте список клиентов в роутере и найдите логгер (MAC начинается на D4:27:87). Сделайте для него **резервирование адреса (DHCP reservation)**, чтобы IP не менялся.

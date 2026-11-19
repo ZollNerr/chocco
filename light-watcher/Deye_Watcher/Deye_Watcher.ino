@@ -13,12 +13,14 @@
   https://github.com/kellerza/sunsynk/blob/main/src/sunsynk/definitions/three_phase_hv.py
 Протокол логгера: https://github.com/jmccrohan/pysolarmanv5
 
-Железо: плата ESP32 на экранированном модуле (ESP32-C3-DevKitM-1, ESP32 DevKit WROOM-32/32U) + USB-блок 5 В.
+Железо: ESP32-S3 DevKitC-1 (модуль WROOM-1U) + внешняя антенна 2.4 ГГц + USB-блок 5 В.
+Подойдёт любая плата на экранированном модуле (ESP32-C3-DevKitM-1, ESP32 DevKit WROOM-32/32U).
 ESP32-C3 SuperMini тоже работает, но с WIFI_TX_LIMIT = true (см. ниже).
 Питать от резервного выхода инвертора, чтобы работало при отключениях (роутер — тоже от резерва).
 
 Библиотеки (Arduino IDE → Library Manager): UniversalTelegramBot 1.3.0, ArduinoJson 7.x.
-Плата: "ESP32C3 Dev Module" (USB CDC On Boot: Enabled) или "ESP32 Dev Module".
+Плата в Arduino IDE: "ESP32S3 Dev Module" (Flash 16MB, прошивка через разъём COM/UART),
+для C3 — "ESP32C3 Dev Module", для WROOM-32 — "ESP32 Dev Module".
 
 БЕЗОПАСНОСТЬ: порт 8899 логгера без пароля. Прошивка только ЧИТАЕТ регистры (функция 0x03),
 ничего в инвертор не записывает.
