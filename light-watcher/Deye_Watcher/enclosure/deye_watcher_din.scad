@@ -29,6 +29,11 @@ cap_t   = 2;
 /* [Отверстия] */
 usb_w = 24; usb_h = 9;
 sma_d = 6.6; sma_y = 52;
+// гнездо RP-SMA (резьба 1/4"-36): внутренняя гайка 8 мм под ключ сидит в шестигранном кармане,
+// поэтому антенну можно вкручивать/выкручивать сколько угодно — разъём не проворачивается
+nut_af = 8.3;    // размер под ключ кармана (гайка 8 мм + зазор)
+nut_t  = 2.2;    // глубина кармана
+boss_t = 3.0;    // утолщение лицевой панели изнутри под карманом
 
 /* [Защёлка] */
 clip_w   = 12;
@@ -93,11 +98,15 @@ module cap() {
     union() {
       cube([mod_w, dev_h, cap_t]);                                       // плечи
       translate([0, dev_h/2 - neck_h/2, 0]) cube([mod_w, neck_h, nd]);   // выступ
+      // ребро-утолщение под гнездом антенны: поперёк выступа от стенки до стенки (печатается мостом)
+      translate([wall - 0.5, sma_y - 7, nd - cap_t - boss_t]) cube([inner_w + 1, 14, boss_t + 0.5]);
     }
     // полость выступа, открытая внутрь корпуса
     translate([wall, dev_h/2 - neck_h/2 + wall, -1]) cube([inner_w, neck_h - 2*wall, nd - cap_t + 1]);
     // RP-SMA на лицевой панели
-    translate([mod_w/2, sma_y, nd - cap_t - 1]) cylinder(d=sma_d, h=cap_t + 2);
+    translate([mod_w/2, sma_y, nd - cap_t - boss_t - 1]) cylinder(d=sma_d, h=cap_t + boss_t + 2);
+    // шестигранный карман под внутреннюю гайку
+    translate([mod_w/2, sma_y, nd - cap_t - boss_t - 0.01]) cylinder(d=nut_af/cos(30), h=nut_t + 0.01, $fn=6);
     // 4 самореза с потаем
     for (x=bx, y=[by_top, by_bot]) translate([x, y, -1]) {
       cylinder(d=2.8, h=cap_t + 2);

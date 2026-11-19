@@ -17,10 +17,13 @@
 |---|---|---|
 | **ESP32‑S3 DevKitC‑1 N16R8, модуль ESP32‑S3‑WROOM‑1U** (разъём IPEX/U.FL под внешнюю антенну), 2× USB Type‑C, гарантия 4 мес. | 567,05 грн | [printec.ua](https://printec.ua/ua/p3039085903-plata-razrabotki-esp32.html) (в наличии 50 шт на 19.11.2026) |
 | **Антенна Wi‑Fi 2.4 ГГц 3 dBi**, RP‑SMA, кабель IPX ~14 см | 59 грн | [arduino.ua](https://arduino.ua/ru/prod5634-antena-wi-fi-2-4ggc-3dbi-rp-sma-plug-ipx) |
+| *или* **пигтейл U.FL → RP‑SMA female (bulkhead, 2 гайки)** + своя антенна RP‑SMA — штыревая или **магнитная на кабеле** (напр. [Teltonika PR1KRF30, 592 грн](https://enko.ua/p/antena-wi-fi-teltonika-antena-zovnshnya-magntna-rp-sma-pr1)) | ≈42 грн + антенна | [Prom.ua](https://prom.ua/ua/p3091760365-pigtejl-perehodnik-sma.html) |
 | **Зарядка Grand‑X CH‑03B**, 5 В 2,1 А, USB‑A | 118 грн | [elmir.ua](https://elmir.ua/ua/mobile_chargers/network_c_a_usb_grand-x_2_1a_black_ch-03b.html) |
 | **Кабель AM USB 2.0 → Type‑C, 0,8 м** (с передачей данных — им же прошивать) | 123 грн | [arduino.ua](https://arduino.ua/prod4026-kabel-am-usb-2-0-type-c-0-8m-gold-plated) |
 
 **Итого ≈ 867 грн.** Зарядка с выходом USB‑A + кабель A→C работают с любой платой. Зарядки «C→C» с PD могут не дать питание платам без резисторов CC. Самодельный блок на 230 В не используем: без корпуса и сертификации он опаснее и дороже. Питать от **резервного выхода инвертора**, как и Wi‑Fi роутер.
+
+Антенна **съёмная**: в корпусе стоит гнездо RP‑SMA, его гайка зажата в шестигранном кармане ([подробнее](enclosure/README.md)). **RP‑SMA ≠ SMA**: обычная SMA‑антенна накрутится, но не будет работать.
 
 ⚠️ **Антенну подключить ДО первого включения.** Модуль «U» без антенны почти не ловит, а передатчику без нагрузки вредно. Плату можно ставить в щит, а антенну вывести **наружу**: металлический щит глушит сигнал.
 

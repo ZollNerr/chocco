@@ -30,6 +30,9 @@ usb_h   = 9.0;    // высота окна
 usb_z   = 6.4;    // центр окна над внутренним полом (рельс + плата + половина разъёма)
 sma_d   = 6.6;    // отверстие под RP-SMA (резьба 1/4"-36 ≈ 6.35 мм)
 sma_z   = 9.0;    // центр отверстия над внутренним полом
+nut_af  = 8.3;    // шестигранный карман под внутреннюю гайку RP-SMA (8 мм под ключ + зазор)
+nut_t   = 2.2;    // глубина кармана
+boss_t  = 3.0;    // утолщение торцевой стенки изнутри
 vent_n  = 4;      // вентиляционные прорези на каждой длинной стенке
 ear     = true;   // ушки для крепления к стене (шуруп ⌀4)
 
@@ -65,6 +68,8 @@ module base() {
         translate([wall + pcb_l + 2*clr, y, floor_t - 0.5]) cube([1.6, 3.5, rail_h + pcb_t + 2.0]);
       // стойки под саморезы крышки
       for (y=post_y) translate([post_x, y, floor_t - 0.5]) cylinder(d=post_d, h=inner_h + 0.5);
+      // утолщение торца под гнездо антенны (ниже бортика крышки)
+      translate([out_l - wall - boss_t, out_w/2 - 7, floor_t - 0.5]) cube([boss_t + 0.5, 14, inner_h - 1.6 - 0.4 + 0.5]);
       // ушки для крепления
       if (ear) for (x=[-10, out_l - 0.5]) translate([x, out_w/2 - 6, 0])
         difference() {
@@ -77,7 +82,10 @@ module base() {
     // окно USB-C (торец x=0)
     translate([-1, out_w/2 - usb_w/2, floor_t + usb_z - usb_h/2]) cube([wall + 2, usb_w, usb_h]);
     // отверстие RP-SMA (торец x=out_l)
-    translate([out_l - wall - 1, out_w/2, floor_t + sma_z]) rotate([0, 90, 0]) cylinder(d=sma_d, h=wall + 2);
+    translate([out_l - wall - boss_t - 1, out_w/2, floor_t + sma_z]) rotate([0, 90, 0]) cylinder(d=sma_d, h=wall + boss_t + 2);
+    // шестигранный карман под внутреннюю гайку (вершиной вверх — печатается без поддержек)
+    translate([out_l - wall - boss_t - 0.01, out_w/2, floor_t + sma_z]) rotate([0, 90, 0]) rotate([0, 0, 30])
+      cylinder(d=nut_af/cos(30), h=nut_t + 0.01, $fn=6);
     // вентиляция на длинных стенках
     for (i=[0:vent_n-1], y=[-1, out_w - wall - 1])
       translate([wall + 8 + i*(pcb_l - 10)/max(vent_n-1,1) - 0.75, y, floor_t + rail_h + pcb_t + 3])
