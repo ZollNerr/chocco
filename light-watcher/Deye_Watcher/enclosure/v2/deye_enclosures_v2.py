@@ -257,6 +257,74 @@ class Wall:
 
 
 # =====================================================================================
+#  Защёлка DIN v2: жёсткий верхний крюк + подпружиненная губка на «змейке»
+# =====================================================================================
+class DinClip:
+    """Профиль в плоскости (Y прибора, W): W=0 — полки рейки, W=4 — задняя стенка прибора,
+    W<0 — к монтажной панели (не глубже -7: рейка 7,5 мм). Выдавливается по ширине X.
+    Губка смоделирована в свободном состоянии: на рейке она поджата на PRELOAD."""
+    width = 16.0
+    rail_bot, rail_top = 27.5, 62.5
+    t_beam, gap, n_beams = 0.8, 1.0, 7       # «змейка»: 7 балок 0,8 мм, зазор 1 мм
+    PRELOAD = 0.3
+    ENGAGE = 2.0                             # зацеп губки за нижнюю полку на рейке
+    screw_y = (39.0, 55.0)                   # те же саморезы, что у v1
+
+    def rects(self):
+        """Прямоугольники (y0, w0, dy, dw) и многоугольники профиля."""
+        rb, rt = self.rail_bot, self.rail_top
+        seat = rb + self.PRELOAD                                  # опора губки под полкой (свободно)
+        lip = rb + self.ENGAGE + self.PRELOAD                     # верх губки (свободно)
+        fixed = [
+            (27.0, 0.0, rt + 4.0 - 27.0, 4.0),                   # основание, прикручено к корпусу
+            (rt, -2.8, 4.0, 2.8),                                 # верхний крюк: стойка
+            (rt - 2.8, -2.8, 6.8, 1.5),                           #   губа за верхней полкой
+            (22.0, 0.0, 5.0, 1.4),                                # палец-направляющая
+            (1.0, 3.2, 26.0, 0.8),                                # лента к якорю пружины
+            (1.0, -5.1, 3.0, 9.1),                                # якорь пружины
+        ]
+        spring = []
+        y = 4.0
+        for k in range(self.n_beams + 1):                         # перемычки и балки
+            right = (k % 2 == 0)
+            spring.append((y, 1.7 if right else -5.1, self.gap, 1.0))
+            y += self.gap
+            if k < self.n_beams:
+                spring.append((y, -5.1, self.t_beam, 7.8))
+                y += self.t_beam
+        ytop = y                                                  # низ подвижной губки
+        jaw = [(ytop, -7.0), (27.0, -7.0), (27.0, -4.8), (lip, -4.8 + (lip - 27.0)), (lip, -1.3),
+               (seat, -1.3), (seat, -0.4), (21.4, -0.4), (21.4, 1.7), (26.3, 1.7), (26.3, 2.7), (ytop, 2.7)]
+        moving = [(-3.0, -7.0, ytop + 3.0, 1.4),                  # тяга к язычку
+                  (-3.0, -7.0, 2.0, 5.5)]                         # язычок под отвёртку
+        return fixed, spring, jaw, moving
+
+    def solid(self):
+        fixed, spring, jaw, moving = self.rects()
+        wp = cq.Workplane("YZ")
+        obj = wp.polyline(jaw).close().extrude(self.width)
+        for (y0, w0, dy, dw) in fixed + spring + moving:
+            obj = obj.union(cq.Workplane("YZ").moveTo(y0, w0).rect(dy, dw, centered=False).extrude(self.width))
+        try:                                                      # скругление внутренних углов «змейки»
+            obj = obj.edges("|X").fillet(0.2)
+        except Exception:
+            pass
+        for y in self.screw_y:
+            hole = cq.Workplane("XY").circle(1.0).extrude(6).translate((self.width / 2, y, -1))
+            obj = obj.cut(hole)
+        return obj
+
+    def rail(self, length=60):
+        rb, rt = self.rail_bot, self.rail_top
+        r = cq.Workplane("YZ")
+        out = None
+        for (y0, w0, dy, dw) in [(rb, -1, 5, 1), (rt - 5, -1, 5, 1), (rb + 4, -7.5, 1, 6.5), (rt - 5, -7.5, 1, 6.5), (rb + 4, -7.5, 27, 1)]:
+            b = cq.Workplane("YZ").moveTo(y0, w0).rect(dy, dw, centered=False).extrude(length)
+            out = b if out is None else out.union(b)
+        return out.translate((-length / 2 + self.width / 2, 0, 0))
+
+
+# =====================================================================================
 def export(obj, path, tol=0.02, ang=0.25):
     cq.exporters.export(obj, path, tolerance=tol, angularTolerance=ang)
 
@@ -269,6 +337,10 @@ def main(out):
     export(cap, f"{out}/deye_din_v2_cap_pcb63.5.stl")             # плечами на стол, выступ вверх
     export(body, f"{out}/deye_din_v2_body_pcb63.5.step")
     export(cap, f"{out}/deye_din_v2_cap_pcb63.5.step")
+    clip = DinClip().solid()
+    # печать плашмя, профилем на стол: «змейка» гнётся вдоль слоёв
+    export(clip.rotate((0, 0, 0), (0, 1, 0), -90).rotate((0, 0, 0), (0, 0, 1), -90), f"{out}/deye_din_v2_clip.stl")
+    export(clip, f"{out}/deye_din_v2_clip.step")
     for pl in (63.5, 69.0):
         w = Wall(pl)
         tag = f"pcb{pl:g}"
